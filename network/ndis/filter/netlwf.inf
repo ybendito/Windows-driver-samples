@@ -101,13 +101,13 @@ HKR, Ndi\Interfaces,LowerRange,,"nolower"
 ; native WWAN stacks, but you must be prepared to handle the packet framing.
 ; Possible values are listed on MSDN, but common values include:
 ;     ethernet, wan, ppip, wlan
-HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet, wan, ppip"
+HKR, Ndi\Interfaces, FilterMediaTypes,,"ethernet"
 ; TODO: Specify whether you have a Mandatory or Optional filter.
 ; For a Mandatory filter, use this:
 ;     HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
 ; For an Optional filter, use this:
 ;     HKR, Ndi,FilterRunType,0x00010001, 2 ; Optional filter
-HKR, Ndi,FilterRunType,0x00010001, 1 ; Mandatory filter
+HKR, Ndi,FilterRunType,0x00010001, 2 ; Optional filter
 
 ; By default, Mandatory filters unbind all protocols when they are
 ; installed/uninstalled, while Optional filters merely pause the stack.  If you
@@ -189,7 +189,13 @@ HKR, FilterAdapterParams\AdapterParam,   type,        , "int"
 ;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,2 ; Do not unbind from Members
 ; To prevent both binding to TNic and unbinding from members:
 ;   HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,3 ; Do not bind to TNic or unbind from Members
-HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,0 ; Subscribe to default behavior
+HKR, Parameters, NdisImPlatformBindingOptions,0x00010001,1 ; Subscribe to default behavior
+HKR, Parameters, MAC0, 0x00000003,00,00,00,00,00,00 ; MAC0
+HKR, Parameters, MAC1, 0x00000003,00,00,00,00,00,00 ; MAC1
+HKR, Parameters, MAC2, 0x00000003,00,00,00,00,00,00 ; MAC2
+HKR, Parameters, MAC3, 0x00000003,00,00,00,00,00,00 ; MAC3
+HKR, Parameters, TimerPeriod,0x00010001,3000 ; Timer Period
+HKR, Parameters, Value,0x00010001,32000 ; Value to populate
 
 [Strings]
 ; TODO: Customize these strings.

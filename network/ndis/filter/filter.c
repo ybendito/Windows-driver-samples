@@ -22,16 +22,154 @@ Abstract:
 // during initialization here.
 #pragma NDIS_INIT_FUNCTION(DriverEntry)
 
+static UCHAR MAC0[ETH_LENGTH_OF_ADDRESS];
+static UCHAR MAC1[ETH_LENGTH_OF_ADDRESS];
+static UCHAR MAC2[ETH_LENGTH_OF_ADDRESS];
+static UCHAR MAC3[ETH_LENGTH_OF_ADDRESS];
+static ULONG timerPeriod = 3;
+static USHORT pauseValue = 0x8000;
+
 //
 // Global variables
 //
 NDIS_HANDLE         FilterDriverHandle; // NDIS handle for filter driver
 NDIS_HANDLE         FilterDriverObject;
 NDIS_HANDLE         NdisFilterDeviceHandle = NULL;
+NDIS_HANDLE         NblPool = NULL;
 PDEVICE_OBJECT      NdisDeviceObject = NULL;
 
 FILTER_LOCK         FilterListLock;
 LIST_ENTRY          FilterModuleList;
+
+
+static PNET_BUFFER_LIST AllocatePauseNbl()
+{
+    if (!NblPool)
+        return NULL;
+    PNET_BUFFER_LIST nbl = NdisAllocateNetBufferList(NblPool, 0, 0);
+    return nbl;
+}
+
+static void FreePauseNbl(PNET_BUFFER_LIST Nbl)
+{
+    NdisFreeNetBufferList(Nbl);
+}
+
+static void AllocatePool()
+{
+    NET_BUFFER_LIST_POOL_PARAMETERS PoolParams;
+
+    PoolParams.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    PoolParams.Header.Size = NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    PoolParams.Header.Revision = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    PoolParams.ProtocolId = NDIS_PROTOCOL_ID_DEFAULT;
+    PoolParams.fAllocateNetBuffer = TRUE;
+    PoolParams.ContextSize = 0;
+    PoolParams.PoolTag = 'ppph';
+    PoolParams.DataSize = 64;
+    NblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
+}
+
+void ConfigureTimerResolution(BOOLEAN Set)
+{
+    ExSetTimerResolution(Set ? 10000 : 0, Set);
+}
+
+static void QueryConfiguration()
+{
+    NDIS_CONFIGURATION_OBJECT co;
+    NDIS_HANDLE cfg;
+    NDIS_STATUS status;
+    co.Header.Type = NDIS_OBJECT_TYPE_CONFIGURATION_OBJECT;
+    co.Header.Revision = NDIS_CONFIGURATION_OBJECT_REVISION_1;
+    co.Header.Size = NDIS_SIZEOF_CONFIGURATION_OBJECT_REVISION_1;
+    co.Flags = 0;
+    co.NdisHandle = FilterDriverHandle;
+    status = NdisOpenConfigurationEx(&co, &cfg);
+    if (status != NDIS_STATUS_SUCCESS)
+    {
+        DEBUGP(DL_ERROR, "===>Getting configuration...\n");
+        return;
+    }
+    NDIS_CONFIGURATION_PARAMETER *param;
+    UNICODE_STRING nameMac0, nameMac1, nameMac2, nameMac3, namePeriod, nameValue, nameDebug;
+    
+    RtlInitUnicodeString(&nameMac0, L"MAC0");
+    RtlInitUnicodeString(&nameMac1, L"MAC1");
+    RtlInitUnicodeString(&nameMac2, L"MAC2");
+    RtlInitUnicodeString(&nameMac3, L"MAC3");
+    RtlInitUnicodeString(&namePeriod, L"TimerPeriod");
+    RtlInitUnicodeString(&nameValue, L"Value");
+    RtlInitUnicodeString(&nameDebug, L"DebugLevel");
+    
+    NdisReadConfiguration(&status, &param, cfg, &nameMac0, NdisParameterBinary);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterBinary && param->ParameterData.BinaryData.Length == ETH_LENGTH_OF_ADDRESS)
+    {
+        UCHAR* a = MAC0;
+        ETH_COPY_NETWORK_ADDRESS(a, param->ParameterData.BinaryData.Buffer);
+        DEBUGP(DL_INFO, "MAC0 %02x-%02x-%02x-%02x-%02x-%02x\n",
+            a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &nameMac1, NdisParameterBinary);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterBinary && param->ParameterData.BinaryData.Length == ETH_LENGTH_OF_ADDRESS)
+    {
+        UCHAR* a = MAC1;
+        ETH_COPY_NETWORK_ADDRESS(a, param->ParameterData.BinaryData.Buffer);
+        DEBUGP(DL_INFO, "MAC1 %02x-%02x-%02x-%02x-%02x-%02x\n",
+            a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &nameMac2, NdisParameterBinary);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterBinary && param->ParameterData.BinaryData.Length == ETH_LENGTH_OF_ADDRESS)
+    {
+        UCHAR* a = MAC2;
+        ETH_COPY_NETWORK_ADDRESS(a, param->ParameterData.BinaryData.Buffer);
+        DEBUGP(DL_INFO, "MAC2 %02x-%02x-%02x-%02x-%02x-%02x\n",
+            a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &nameMac3, NdisParameterBinary);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterBinary && param->ParameterData.BinaryData.Length == ETH_LENGTH_OF_ADDRESS)
+    {
+        UCHAR* a = MAC3;
+        ETH_COPY_NETWORK_ADDRESS(a, param->ParameterData.BinaryData.Buffer);
+        DEBUGP(DL_INFO, "MAC3 %02x-%02x-%02x-%02x-%02x-%02x\n",
+            a[0], a[1], a[2], a[3], a[4], a[5]);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &namePeriod, NdisParameterInteger);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
+    {
+        timerPeriod = param->ParameterData.IntegerData;
+        DEBUGP(DL_INFO, "Using timerPeriod = %d\n", timerPeriod);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &nameValue, NdisParameterInteger);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
+    {
+        param->ParameterData.IntegerData = min(param->ParameterData.IntegerData, 0xffff);
+        pauseValue = (USHORT)param->ParameterData.IntegerData;
+        DEBUGP(DL_INFO, "Using pause Value = %d\n", pauseValue);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &nameDebug, NdisParameterInteger);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
+    {
+        filterDebugLevel = param->ParameterData.IntegerData;
+        DEBUGP(DL_ERROR, "Using debug level = %d\n", filterDebugLevel);
+    }
+
+    NdisCloseConfiguration(cfg);
+}
+
+static BOOLEAN CheckMac(const UCHAR* a)
+{
+    if (RtlCompareMemory(a, MAC0, ETH_LENGTH_OF_ADDRESS) == ETH_LENGTH_OF_ADDRESS)
+        return TRUE;
+    if (RtlCompareMemory(a, MAC1, ETH_LENGTH_OF_ADDRESS) == ETH_LENGTH_OF_ADDRESS)
+        return TRUE;
+    if (RtlCompareMemory(a, MAC2, ETH_LENGTH_OF_ADDRESS) == ETH_LENGTH_OF_ADDRESS)
+        return TRUE;
+    if (RtlCompareMemory(a, MAC3, ETH_LENGTH_OF_ADDRESS) == ETH_LENGTH_OF_ADDRESS)
+        return TRUE;
+    return FALSE;
+}
+
 
 NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
 { 0, 0, 0},
@@ -42,7 +180,6 @@ NDIS_FILTER_PARTIAL_CHARACTERISTICS DefaultChars = {
       FilterReceiveNetBufferLists,
       FilterReturnNetBufferLists
 };
-
 
 _Use_decl_annotations_
 NTSTATUS
@@ -74,102 +211,138 @@ Return Value:
 {
     NDIS_STATUS Status;
     NDIS_FILTER_DRIVER_CHARACTERISTICS      FChars;
-    NDIS_STRING ServiceName  = RTL_CONSTANT_STRING(FILTER_SERVICE_NAME);
-    NDIS_STRING UniqueName   = RTL_CONSTANT_STRING(FILTER_UNIQUE_NAME);
-    NDIS_STRING FriendlyName = RTL_CONSTANT_STRING(FILTER_FRIENDLY_NAME);
-    BOOLEAN bFalse = FALSE;
+NDIS_STRING ServiceName = RTL_CONSTANT_STRING(FILTER_SERVICE_NAME);
+NDIS_STRING UniqueName = RTL_CONSTANT_STRING(FILTER_UNIQUE_NAME);
+NDIS_STRING FriendlyName = RTL_CONSTANT_STRING(FILTER_FRIENDLY_NAME);
+BOOLEAN bFalse = FALSE;
 
-    UNREFERENCED_PARAMETER(RegistryPath);
+UNREFERENCED_PARAMETER(RegistryPath);
 
-    DEBUGP(DL_TRACE, "===>DriverEntry...\n");
+DEBUGP(DL_TRACE, "===>DriverEntry...\n");
 
-    FilterDriverObject = DriverObject;
+FilterDriverObject = DriverObject;
 
-    do
-    {
-        NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
-        FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
-        FChars.Header.Size = sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS);
+do
+{
+    NdisZeroMemory(&FChars, sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS));
+    FChars.Header.Type = NDIS_OBJECT_TYPE_FILTER_DRIVER_CHARACTERISTICS;
+    FChars.Header.Size = sizeof(NDIS_FILTER_DRIVER_CHARACTERISTICS);
 #if NDIS_SUPPORT_NDIS61
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
+    FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_2;
 #else
-        FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
+    FChars.Header.Revision = NDIS_FILTER_CHARACTERISTICS_REVISION_1;
 #endif
 
-        FChars.MajorNdisVersion = FILTER_MAJOR_NDIS_VERSION;
-        FChars.MinorNdisVersion = FILTER_MINOR_NDIS_VERSION;
-        FChars.MajorDriverVersion = 1;
-        FChars.MinorDriverVersion = 0;
-        FChars.Flags = 0;
+    FChars.MajorNdisVersion = FILTER_MAJOR_NDIS_VERSION;
+    FChars.MinorNdisVersion = FILTER_MINOR_NDIS_VERSION;
+    FChars.MajorDriverVersion = 1;
+    FChars.MinorDriverVersion = 0;
+    FChars.Flags = 0;
 
-        FChars.FriendlyName = FriendlyName;
-        FChars.UniqueName = UniqueName;
-        FChars.ServiceName = ServiceName;
+    FChars.FriendlyName = FriendlyName;
+    FChars.UniqueName = UniqueName;
+    FChars.ServiceName = ServiceName;
 
-        //
-        // TODO: Most handlers are optional, however, this sample includes them
-        // all for illustrative purposes.  If you do not need a particular 
-        // handler, set it to NULL and NDIS will more efficiently pass the
-        // operation through on your behalf.
-        //
-        FChars.SetOptionsHandler = FilterRegisterOptions;
-        FChars.AttachHandler = FilterAttach;
-        FChars.DetachHandler = FilterDetach;
-        FChars.RestartHandler = FilterRestart;
-        FChars.PauseHandler = FilterPause;
-        FChars.SetFilterModuleOptionsHandler = FilterSetModuleOptions;
-        FChars.OidRequestHandler = FilterOidRequest;
-        FChars.OidRequestCompleteHandler = FilterOidRequestComplete;
-        FChars.CancelOidRequestHandler = FilterCancelOidRequest;
+    //
+    // TODO: Most handlers are optional, however, this sample includes them
+    // all for illustrative purposes.  If you do not need a particular 
+    // handler, set it to NULL and NDIS will more efficiently pass the
+    // operation through on your behalf.
+    //
+    FChars.SetOptionsHandler = FilterRegisterOptions;
+    FChars.AttachHandler = FilterAttach;
+    FChars.DetachHandler = FilterDetach;
+    FChars.RestartHandler = FilterRestart;
+    FChars.PauseHandler = FilterPause;
+    FChars.SetFilterModuleOptionsHandler = FilterSetModuleOptions;
+    //FChars.OidRequestHandler = FilterOidRequest;
+    //FChars.OidRequestCompleteHandler = FilterOidRequestComplete;
+    //FChars.CancelOidRequestHandler = FilterCancelOidRequest;
 
-        FChars.SendNetBufferListsHandler = FilterSendNetBufferLists;
-        FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
-        FChars.SendNetBufferListsCompleteHandler = FilterSendNetBufferListsComplete;
-        FChars.ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists;
-        FChars.DevicePnPEventNotifyHandler = FilterDevicePnPEventNotify;
-        FChars.NetPnPEventHandler = FilterNetPnPEvent;
-        FChars.StatusHandler = FilterStatus;
-        FChars.CancelSendNetBufferListsHandler = FilterCancelSendNetBufferLists;
+    //FChars.SendNetBufferListsHandler = FilterSendNetBufferLists;
+    //FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
+    FChars.SendNetBufferListsCompleteHandler = FilterSendNetBufferListsComplete;
+    //FChars.ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists;
+    FChars.DevicePnPEventNotifyHandler = FilterDevicePnPEventNotify;
+    //FChars.NetPnPEventHandler = FilterNetPnPEvent;
+    FChars.StatusHandler = FilterStatus;
+    //FChars.CancelSendNetBufferListsHandler = FilterCancelSendNetBufferLists;
 
-        DriverObject->DriverUnload = FilterUnload;
+    DriverObject->DriverUnload = FilterUnload;
 
-        FilterDriverHandle = NULL;
+    FilterDriverHandle = NULL;
 
-        //
-        // Initialize spin locks
-        //
-        FILTER_INIT_LOCK(&FilterListLock);
+    //
+    // Initialize spin locks
+    //
+    FILTER_INIT_LOCK(&FilterListLock);
 
-        InitializeListHead(&FilterModuleList);
+    InitializeListHead(&FilterModuleList);
 
-        Status = NdisFRegisterFilterDriver(DriverObject,
-                                           (NDIS_HANDLE)FilterDriverObject,
-                                           &FChars,
-                                           &FilterDriverHandle);
-        if (Status != NDIS_STATUS_SUCCESS)
-        {
-            DEBUGP(DL_WARN, "Register filter driver failed.\n");
-            break;
-        }
-
-        Status = FilterRegisterDevice();
-
-        if (Status != NDIS_STATUS_SUCCESS)
-        {
-            NdisFDeregisterFilterDriver(FilterDriverHandle);
-            FILTER_FREE_LOCK(&FilterListLock);
-            DEBUGP(DL_WARN, "Register device for the filter driver failed.\n");
-            break;
-        }
-
-
+    Status = NdisFRegisterFilterDriver(DriverObject,
+        (NDIS_HANDLE)FilterDriverObject,
+        &FChars,
+        &FilterDriverHandle);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DEBUGP(DL_WARN, "Register filter driver failed.\n");
+        break;
     }
-    while(bFalse);
+
+    Status = FilterRegisterDevice();
+
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        NdisFDeregisterFilterDriver(FilterDriverHandle);
+        FILTER_FREE_LOCK(&FilterListLock);
+        DEBUGP(DL_WARN, "Register device for the filter driver failed.\n");
+        break;
+    }
+    else
+    {
+        AllocatePool();
+        ConfigureTimerResolution(TRUE);
+    }
+} while (bFalse);
 
 
-    DEBUGP(DL_TRACE, "<===DriverEntry, Status = %8x\n", Status);
-    return Status;
+DEBUGP(DL_TRACE, "<===DriverEntry, Status = %8x\n", Status);
+return Status;
 
+}
+
+void FilterSendPauseFrame(PMS_FILTER pFilter)
+{
+    PNET_BUFFER_LIST nbl = AllocatePauseNbl();
+    if (!nbl)
+        return;
+    NDIS_STATUS status = NdisRetreatNetBufferListDataStart(nbl, 64, 0, NULL, NULL);
+    if (!NT_SUCCESS(status))
+    {
+        FreePauseNbl(nbl);
+        return;
+    }
+    PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(nbl);
+    while (nb)
+    {
+        DEBUGP(DL_LOUD, "NB of %d:\n", NET_BUFFER_DATA_LENGTH(nb));
+        PMDL mdl = NET_BUFFER_CURRENT_MDL(nb);
+        if (mdl)
+        {
+            PVOID ps = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+            PVOID pv = MmGetMdlVirtualAddress(mdl);
+            ULONG count = MmGetMdlByteCount(mdl);
+            DEBUGP(DL_LOUD, "MDL at %p:%p, count %d\n", ps, pv, count);
+            if (count == 64)
+            {
+                RtlZeroMemory(pv, 64);
+                RtlCopyMemory(pv, pFilter->PauseData, sizeof(pFilter->PauseData));
+                NdisFSendNetBufferLists(pFilter->FilterHandle, nbl, 0, 0);
+                break;
+            }
+        }
+        nb = NET_BUFFER_NEXT_NB(nb);
+    }
 }
 
 _Use_decl_annotations_
@@ -217,6 +390,42 @@ Return Value:
     return NDIS_STATUS_SUCCESS;
 }
 
+void FilterTimerProc(
+    PVOID SystemSpecific1,
+    PVOID FunctionContext,
+    PVOID SystemSpecific2,
+    PVOID SystemSpecific3
+)
+{
+    PMS_FILTER pFilter = (PMS_FILTER)FunctionContext;
+    UNREFERENCED_PARAMETER(SystemSpecific1);
+    UNREFERENCED_PARAMETER(SystemSpecific2);
+    UNREFERENCED_PARAMETER(SystemSpecific3);
+    UNREFERENCED_PARAMETER(pFilter);
+    DEBUGP(DL_LOUD, "===>%s\n", __FUNCTION__);
+    FilterSendPauseFrame(pFilter);
+    pFilter->TickCounter++;
+    if ((pFilter->TickCounter % 1024) == 0)
+    {
+        DEBUGP(DL_INFO, "Another 1024 tick\n", __FUNCTION__);
+    }
+}
+
+void FilterUpdateTimer(PMS_FILTER pFilter)
+{
+    BOOLEAN bStart = timerPeriod && pFilter->LinkUp && pFilter->State == FilterRunning;
+    if (bStart)
+    {
+        LARGE_INTEGER due;
+        due.QuadPart = (LONGLONG)(-10000);
+        due.QuadPart *= timerPeriod;
+        NdisSetTimerObject(pFilter->TimerObject, due, timerPeriod, pFilter);
+    }
+    else
+    {
+        NdisCancelTimerObject(pFilter->TimerObject);
+    }
+}
 
 _Use_decl_annotations_
 NDIS_STATUS
@@ -261,6 +470,8 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
     ULONG                   Size;
     BOOLEAN               bFalse = FALSE;
 
+    QueryConfiguration();
+
     DEBUGP(DL_TRACE, "===>FilterAttach: NdisFilterHandle %p\n", NdisFilterHandle);
 
     do
@@ -280,14 +491,23 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         //
         // Your setup/install code should not bind the filter to unsupported
         // media types.
-        if ((AttachParameters->MiniportMediaType != NdisMedium802_3)
-                && (AttachParameters->MiniportMediaType != NdisMediumWan)
-                && (AttachParameters->MiniportMediaType != NdisMediumWirelessWan))
+        if (AttachParameters->MiniportMediaType != NdisMedium802_3)
+//                && (AttachParameters->MiniportMediaType != NdisMediumWan)
+//                && (AttachParameters->MiniportMediaType != NdisMediumWirelessWan))
         {
            DEBUGP(DL_ERROR, "Unsupported media type.\n");
 
            Status = NDIS_STATUS_INVALID_PARAMETER;
            break;
+        }
+        if (!CheckMac(AttachParameters->CurrentMacAddress))
+        {
+            const UCHAR* a = AttachParameters->CurrentMacAddress;
+            DEBUGP(DL_ERROR, "MAC %02x-%02x-%02x-%02x-%02x-%02x is not configured for filtering\n",
+                a[0], a[1], a[2], a[3], a[4], a[5]);
+
+            Status = NDIS_STATUS_INVALID_PARAMETER;
+            break;
         }
 
         Size = sizeof(MS_FILTER) +
@@ -333,8 +553,8 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         // driver, since its default characteristic has both a send and a receive handler,
         // these fields are initialized to TRUE.
         //
-        pFilter->TrackReceives = TRUE;
-        pFilter->TrackSends = TRUE;
+        pFilter->TrackReceives = FALSE;
+        pFilter->TrackSends = FALSE;
         pFilter->FilterHandle = NdisFilterHandle;
 
 
@@ -354,6 +574,31 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             break;
         }
 
+        NDIS_TIMER_CHARACTERISTICS TimerChars;
+        TimerChars.Header.Type = NDIS_OBJECT_TYPE_TIMER_CHARACTERISTICS;
+        TimerChars.Header.Revision = NDIS_TIMER_CHARACTERISTICS_REVISION_1;
+        TimerChars.Header.Size = NDIS_SIZEOF_TIMER_CHARACTERISTICS_REVISION_1;
+        TimerChars.AllocationTag = 'ppph';
+        TimerChars.TimerFunction = FilterTimerProc;
+        TimerChars.FunctionContext = pFilter;
+
+        Status = NdisAllocateTimerObject(NdisFilterHandle, &TimerChars, &pFilter->TimerObject);
+
+        if (Status != NDIS_STATUS_SUCCESS)
+        {
+            DEBUGP(DL_WARN, "Failed to set up the timer.\n");
+            break;
+        }
+
+        const UCHAR MilticastAddress[ETH_LENGTH_OF_ADDRESS] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x01 };
+        ETH_COPY_NETWORK_ADDRESS(pFilter->PauseData, MilticastAddress);
+        ETH_COPY_NETWORK_ADDRESS(pFilter->PauseData + ETH_LENGTH_OF_ADDRESS, AttachParameters->CurrentMacAddress);
+        pFilter->PauseData[12] = 0x88;
+        pFilter->PauseData[13] = 0x08;
+        pFilter->PauseData[14] = 0x00;
+        pFilter->PauseData[15] = 0x01;
+        pFilter->PauseData[16] = pauseValue >> 8; 
+        pFilter->PauseData[17] = pauseValue & 0xff;
 
         pFilter->State = FilterPaused;
 
@@ -440,6 +685,8 @@ N.B.: When the filter is in Pausing state, it can still process OID requests,
     Status = NDIS_STATUS_SUCCESS;
 
     pFilter->State = FilterPaused;
+
+    FilterUpdateTimer(pFilter);
 
     DEBUGP(DL_TRACE, "<===FilterPause:  Status %x\n", Status);
     return Status;
@@ -603,6 +850,10 @@ Return Value:
     {
         pFilter->State = FilterPaused;
     }
+    else
+    {
+        FilterUpdateTimer(pFilter);
+    }
 
 
     DEBUGP(DL_TRACE, "<===FilterRestart:  FilterModuleContext %p, Status %x\n", FilterModuleContext, Status);
@@ -664,7 +915,8 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     RemoveEntryList(&pFilter->FilterModuleLink);
     FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
 
-
+    NdisFreeTimerObject(pFilter->TimerObject);
+    
     //
     // Free the memory allocated
     FILTER_FREE_MEM(pFilter);
@@ -708,6 +960,12 @@ Return Value:
     // Should free the filter context list
     //
     FilterDeregisterDevice();
+
+    if (NblPool)
+    {
+        NdisFreeNetBufferListPool(NblPool);
+    }
+    ConfigureTimerResolution(FALSE);
     NdisFDeregisterFilterDriver(FilterDriverHandle);
 
 #if DBG
@@ -1001,6 +1259,15 @@ Arguments:
     DEBUGP(DL_TRACE, "<===FilterOidRequestComplete.\n");
 }
 
+static void FilterLinkChanged(
+    PMS_FILTER              pFilter,
+    NDIS_MEDIA_CONNECT_STATE Connect
+)
+{
+    pFilter->LinkUp = Connect == MediaConnectStateConnected;
+    DEBUGP(DL_TRACE, "===>Filter Link %s\n", pFilter->LinkUp ? "Up" : "Down");
+    FilterUpdateTimer(pFilter);
+}
 
 _Use_decl_annotations_
 VOID
@@ -1048,6 +1315,11 @@ NOTE: called at <= DISPATCH_LEVEL
     pFilter->bIndicating = TRUE;
     FILTER_RELEASE_LOCK(&pFilter->Lock, bFalse);
 #endif // DBG
+    if (StatusIndication->StatusCode == NDIS_STATUS_LINK_STATE)
+    {
+        NDIS_LINK_STATE *linkState = (NDIS_LINK_STATE*)StatusIndication->StatusBuffer;
+        FilterLinkChanged(pFilter, linkState->MediaConnectState);
+    }
 
     NdisFIndicateStatus(pFilter->FilterHandle, StatusIndication);
 
@@ -1198,12 +1470,8 @@ Return Value:
 --*/
 {
     PMS_FILTER         pFilter = (PMS_FILTER)FilterModuleContext;
-    ULONG              NumOfSendCompletes = 0;
     BOOLEAN            DispatchLevel;
-    PNET_BUFFER_LIST   CurrNbl;
-
-    DEBUGP(DL_TRACE, "===>SendNBLComplete, NetBufferList: %p.\n", NetBufferLists);
-
+    PNET_BUFFER_LIST   *pCurrent = &NetBufferLists;
 
     //
     // If your filter injected any send packets into the datapath to be sent,
@@ -1211,36 +1479,30 @@ Return Value:
     // attempt to send-complete your NBLs up to the higher layer.
     //
 
-    //
-    // If your filter has modified any NBLs (or NBs, MDLs, etc) in your
-    // FilterSendNetBufferLists handler, you must undo the modifications here.
-    // In general, NBLs must be returned in the same condition in which you had
-    // you received them.  (Exceptions: the NBLs can be re-ordered on the linked
-    // list, and the scratch fields are don't-care).
-    //
-
-    if (pFilter->TrackSends)
+    while (*pCurrent)
     {
-        CurrNbl = NetBufferLists;
-        while (CurrNbl)
+        PNET_BUFFER_LIST CurrentNbl = *pCurrent;
+        if (CurrentNbl->NdisPoolHandle == NblPool)
         {
-            NumOfSendCompletes++;
-            CurrNbl = NET_BUFFER_LIST_NEXT_NBL(CurrNbl);
-
+            NdisAdvanceNetBufferListDataStart(CurrentNbl, 64, FALSE, NULL);
+            *pCurrent = NET_BUFFER_LIST_NEXT_NBL(CurrentNbl);
+            NET_BUFFER_LIST_NEXT_NBL(CurrentNbl) = NULL;
+            FreePauseNbl(CurrentNbl);
+            DEBUGP(DL_LOUD, "Removed completed Pause NBL, new current %p\n", *pCurrent);
         }
-        DispatchLevel = NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendCompleteFlags);
-        FILTER_ACQUIRE_LOCK(&pFilter->Lock, DispatchLevel);
-        pFilter->OutstandingSends -= NumOfSendCompletes;
-        FILTER_LOG_SEND_REF(2, pFilter, PrevNbl, pFilter->OutstandingSends);
-        FILTER_RELEASE_LOCK(&pFilter->Lock, DispatchLevel);
+        else
+        {
+            pCurrent = &(NET_BUFFER_LIST_NEXT_NBL(CurrentNbl));
+        }
     }
-
+    if (!NetBufferLists)
+    {
+        return;
+    }
     // Send complete the NBLs.  If you removed any NBLs from the chain, make
     // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
-
+    DispatchLevel = NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendCompleteFlags);
     NdisFSendNetBufferListsComplete(pFilter->FilterHandle, NetBufferLists, SendCompleteFlags);
-
-    DEBUGP(DL_TRACE, "<===SendNBLComplete.\n");
 }
 
 
@@ -1632,76 +1894,8 @@ Return Value:
 
 --*/
 {
-   PMS_FILTER                               pFilter = (PMS_FILTER)FilterModuleContext;
-   NDIS_FILTER_PARTIAL_CHARACTERISTICS      OptionalHandlers;
    NDIS_STATUS                              Status = NDIS_STATUS_SUCCESS;
-   BOOLEAN                                  bFalse = FALSE;
-
-   //
-   // Demonstrate how to change send/receive handlers at runtime.
-   //
-   if (bFalse)
-   {
-       UINT      i;
-
-
-       pFilter->CallsRestart++;
-
-       i = pFilter->CallsRestart % 8;
-
-       pFilter->TrackReceives = TRUE;
-       pFilter->TrackSends = TRUE;
-
-       NdisMoveMemory(&OptionalHandlers, &DefaultChars, sizeof(OptionalHandlers));
-       OptionalHandlers.Header.Type = NDIS_OBJECT_TYPE_FILTER_PARTIAL_CHARACTERISTICS;
-       OptionalHandlers.Header.Size = sizeof(OptionalHandlers);
-       switch (i)
-       {
-
-            case 0:
-                OptionalHandlers.ReceiveNetBufferListsHandler = NULL;
-                pFilter->TrackReceives = FALSE;
-                break;
-
-            case 1:
-
-                OptionalHandlers.ReturnNetBufferListsHandler = NULL;
-                pFilter->TrackReceives = FALSE;
-                break;
-
-            case 2:
-                OptionalHandlers.SendNetBufferListsHandler = NULL;
-                pFilter->TrackSends = FALSE;
-                break;
-
-            case 3:
-                OptionalHandlers.SendNetBufferListsCompleteHandler = NULL;
-                pFilter->TrackSends = FALSE;
-                break;
-
-            case 4:
-                OptionalHandlers.ReceiveNetBufferListsHandler = NULL;
-                OptionalHandlers.ReturnNetBufferListsHandler = NULL;
-                break;
-
-            case 5:
-                OptionalHandlers.SendNetBufferListsHandler = NULL;
-                OptionalHandlers.SendNetBufferListsCompleteHandler = NULL;
-                break;
-
-            case 6:
-
-                OptionalHandlers.ReceiveNetBufferListsHandler = NULL;
-                OptionalHandlers.ReturnNetBufferListsHandler = NULL;
-                OptionalHandlers.SendNetBufferListsHandler = NULL;
-                OptionalHandlers.SendNetBufferListsCompleteHandler = NULL;
-                break;
-
-            case 7:
-                break;
-       }
-       Status = NdisSetOptionalHandlers(pFilter->FilterHandle, (PNDIS_DRIVER_OPTIONAL_HANDLERS)&OptionalHandlers );
-   }
+   UNREFERENCED_PARAMETER(FilterModuleContext);
    return Status;
 }
 

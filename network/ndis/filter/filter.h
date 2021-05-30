@@ -331,6 +331,10 @@ typedef struct _MS_FILTER
 #if DBG
     BOOLEAN                         bIndicating;
 #endif
+    BOOLEAN                         LinkUp;
+    UCHAR                           PauseData[ETH_LENGTH_OF_ADDRESS * 2 + 6];
+    NDIS_HANDLE                     TimerObject;
+    ULONG                           TickCounter;
 
     PNDIS_OID_REQUEST               PendingOidRequest;
 
@@ -449,7 +453,6 @@ filterInternalRequestComplete(
     _In_ PNDIS_OID_REQUEST            NdisRequest,
     _In_ NDIS_STATUS                  Status
     );
-
 
 #endif  //_FILT_H
 
