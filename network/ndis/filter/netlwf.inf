@@ -194,7 +194,7 @@ HKR, Parameters, MAC0, 0x00000003,00,00,00,00,00,00 ; MAC0
 HKR, Parameters, MAC1, 0x00000003,00,00,00,00,00,00 ; MAC1
 HKR, Parameters, MAC2, 0x00000003,00,00,00,00,00,00 ; MAC2
 HKR, Parameters, MAC3, 0x00000003,00,00,00,00,00,00 ; MAC3
-HKR, Parameters, TimerPeriod,0x00010001,3000 ; Timer Period
+HKR, Parameters, TimerPeriod,0x00010001,0 ; Timer Period
 HKR, Parameters, Value,0x00010001,32000 ; Value to populate
 
 [Strings]

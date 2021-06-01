@@ -915,6 +915,9 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
     RemoveEntryList(&pFilter->FilterModuleLink);
     FILTER_RELEASE_LOCK(&FilterListLock, bFalse);
 
+    FilterUpdateTimer(pFilter);
+    NdisMSleep(100000);
+    FilterUpdateTimer(pFilter);
     NdisFreeTimerObject(pFilter->TimerObject);
     
     //
@@ -961,12 +964,13 @@ Return Value:
     //
     FilterDeregisterDevice();
 
+    NdisFDeregisterFilterDriver(FilterDriverHandle);
+    DEBUGP(DL_TRACE, "Deleting the NBL pool...\n");
     if (NblPool)
     {
         NdisFreeNetBufferListPool(NblPool);
     }
     ConfigureTimerResolution(FALSE);
-    NdisFDeregisterFilterDriver(FilterDriverHandle);
 
 #if DBG
     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
