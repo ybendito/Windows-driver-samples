@@ -294,6 +294,12 @@ typedef struct _FILTER_REQUEST
     NDIS_STATUS            Status;
 } FILTER_REQUEST, *PFILTER_REQUEST;
 
+typedef struct _FILTER_DPC
+{
+    KDPC Dpc;
+    LONG             Allocated;
+} FILTER_DPC, *PFILTER_DPC;
+
 //
 // Define the filter struct
 //
@@ -335,10 +341,19 @@ typedef struct _MS_FILTER
     UCHAR                           PauseData[ETH_LENGTH_OF_ADDRESS * 2 + 6];
     NDIS_HANDLE                     TimerObject;
     ULONG                           TickCounter;
+    LONG                            NumIndication;
+    LONG                            DroppedPackets;
+    LONG                            LastDroppedPackets;
+    ULONG                           NoTransferCounter;
+    UCHAR                           PacketBuffer[0x2000];
+    FILTER_DPC                      DpcArray[0x2000];
+    ULONG                           LastDpcIndex;
+    ULONG                           LastCPUNumber;
+    ULONG                           DpcNotFoundCounter;
 
     PNDIS_OID_REQUEST               PendingOidRequest;
 
-}MS_FILTER, * PMS_FILTER;
+} MS_FILTER, * PMS_FILTER;
 
 
 typedef struct _FILTER_DEVICE_EXTENSION

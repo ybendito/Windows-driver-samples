@@ -28,6 +28,8 @@ static UCHAR MAC2[ETH_LENGTH_OF_ADDRESS];
 static UCHAR MAC3[ETH_LENGTH_OF_ADDRESS];
 static ULONG timerPeriod = 3;
 static USHORT pauseValue = 0x8000;
+static ULONG LengthToDrop = 0;
+static ULONG NumberOfProcessors;
 
 //
 // Global variables
@@ -92,7 +94,8 @@ static void QueryConfiguration()
         return;
     }
     NDIS_CONFIGURATION_PARAMETER *param;
-    UNICODE_STRING nameMac0, nameMac1, nameMac2, nameMac3, namePeriod, nameValue, nameDebug;
+    UNICODE_STRING nameMac0, nameMac1, nameMac2, nameMac3;
+    UNICODE_STRING namePeriod, nameValue, nameDebug, nameLengthToDrop;
     
     RtlInitUnicodeString(&nameMac0, L"MAC0");
     RtlInitUnicodeString(&nameMac1, L"MAC1");
@@ -101,7 +104,8 @@ static void QueryConfiguration()
     RtlInitUnicodeString(&namePeriod, L"TimerPeriod");
     RtlInitUnicodeString(&nameValue, L"Value");
     RtlInitUnicodeString(&nameDebug, L"DebugLevel");
-    
+    RtlInitUnicodeString(&nameLengthToDrop, L"DropLength");
+
     NdisReadConfiguration(&status, &param, cfg, &nameMac0, NdisParameterBinary);
     if (NT_SUCCESS(status) && param->ParameterType == NdisParameterBinary && param->ParameterData.BinaryData.Length == ETH_LENGTH_OF_ADDRESS)
     {
@@ -152,6 +156,12 @@ static void QueryConfiguration()
     {
         filterDebugLevel = param->ParameterData.IntegerData;
         DEBUGP(DL_ERROR, "Using debug level = %d\n", filterDebugLevel);
+    }
+    NdisReadConfiguration(&status, &param, cfg, &nameLengthToDrop, NdisParameterInteger);
+    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
+    {
+        LengthToDrop = param->ParameterData.IntegerData;
+        DEBUGP(DL_ERROR, "Using LengthToDrop = %d\n", LengthToDrop);
     }
 
     NdisCloseConfiguration(cfg);
@@ -220,6 +230,7 @@ UNREFERENCED_PARAMETER(RegistryPath);
 
 DEBUGP(DL_TRACE, "===>DriverEntry...\n");
 
+NumberOfProcessors = KeQueryMaximumProcessorCount();
 FilterDriverObject = DriverObject;
 
 do
@@ -260,9 +271,9 @@ do
     //FChars.CancelOidRequestHandler = FilterCancelOidRequest;
 
     //FChars.SendNetBufferListsHandler = FilterSendNetBufferLists;
-    //FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
+    FChars.ReturnNetBufferListsHandler = FilterReturnNetBufferLists;
     FChars.SendNetBufferListsCompleteHandler = FilterSendNetBufferListsComplete;
-    //FChars.ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists;
+    FChars.ReceiveNetBufferListsHandler = FilterReceiveNetBufferLists;
     FChars.DevicePnPEventNotifyHandler = FilterDevicePnPEventNotify;
     //FChars.NetPnPEventHandler = FilterNetPnPEvent;
     FChars.StatusHandler = FilterStatus;
@@ -306,7 +317,9 @@ do
 } while (bFalse);
 
 
+DEBUGP(DL_TRACE, "%d processors\n", NumberOfProcessors);
 DEBUGP(DL_TRACE, "<===DriverEntry, Status = %8x\n", Status);
+
 return Status;
 
 }
@@ -407,7 +420,26 @@ void FilterTimerProc(
     pFilter->TickCounter++;
     if ((pFilter->TickCounter % 1024) == 0)
     {
-        DEBUGP(DL_INFO, "Another 1024 tick\n", __FUNCTION__);
+        DEBUGP(DL_INFO, "%s: Another 1024 tick\n", __FUNCTION__);
+    }
+    else if (timerPeriod >= 5000)
+    {
+        DEBUGP(DL_INFO, "%s: Tick, dropped %d\n", __FUNCTION__, pFilter->DroppedPackets);
+        if (pFilter->DroppedPackets != pFilter->LastDroppedPackets)
+        {
+            pFilter->LastDroppedPackets = pFilter->DroppedPackets;
+            pFilter->NoTransferCounter = 0;
+        }
+        else if (pFilter->DroppedPackets)
+        {
+            pFilter->NoTransferCounter++;
+            if (pFilter->NoTransferCounter > 2)
+            {
+                pFilter->DroppedPackets = pFilter->LastDroppedPackets = 0;
+                pFilter->NoTransferCounter = 0;
+                DEBUGP(DL_INFO, "%s: was %d indications\n", __FUNCTION__, pFilter->NumIndication);
+            }
+        }
     }
 }
 
@@ -425,6 +457,26 @@ void FilterUpdateTimer(PMS_FILTER pFilter)
     {
         NdisCancelTimerObject(pFilter->TimerObject);
     }
+}
+
+static void FilterDpcProc(
+    KDPC* Dpc,
+    PVOID DeferredContext,
+    PVOID SystemArgument1,
+    PVOID SystemArgument2
+)
+{
+    PMS_FILTER pFilter = (PMS_FILTER)DeferredContext;
+    PNET_BUFFER_LIST Nbl = (PNET_BUFFER_LIST)SystemArgument1;
+    ULONG nof = (ULONG)(ULONG_PTR)SystemArgument2;
+    FILTER_DPC *Fdpc = (FILTER_DPC*)Dpc;
+    NdisFIndicateReceiveNetBufferLists(
+        pFilter->FilterHandle,
+        Nbl,
+        0,
+        nof,
+        NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
+    InterlockedDecrement(&Fdpc->Allocated);
 }
 
 _Use_decl_annotations_
@@ -469,6 +521,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
     NDIS_FILTER_ATTRIBUTES  FilterAttributes;
     ULONG                   Size;
     BOOLEAN               bFalse = FALSE;
+    UINT i;
 
     QueryConfiguration();
 
@@ -599,6 +652,11 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
         pFilter->PauseData[15] = 0x01;
         pFilter->PauseData[16] = pauseValue >> 8; 
         pFilter->PauseData[17] = pauseValue & 0xff;
+
+        for (i = 0; i < RTL_NUMBER_OF(pFilter->DpcArray); ++i)
+        {
+            KeInitializeDpc(&pFilter->DpcArray[i].Dpc, FilterDpcProc, pFilter);
+        }
 
         pFilter->State = FilterPaused;
 
@@ -1639,6 +1697,7 @@ Arguments:
 --*/
 {
     PMS_FILTER          pFilter = (PMS_FILTER)FilterModuleContext;
+#if 0
     PNET_BUFFER_LIST    CurrNbl = NetBufferLists;
     UINT                NumOfNetBufferLists = 0;
     BOOLEAN             DispatchLevel;
@@ -1674,9 +1733,9 @@ Arguments:
     
     // Return the received NBLs.  If you removed any NBLs from the chain, make
     // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
-
+#endif
     NdisFReturnNetBufferLists(pFilter->FilterHandle, NetBufferLists, ReturnFlags);
-
+#if 0
     if (pFilter->TrackReceives)
     {
         DispatchLevel = NDIS_TEST_RETURN_AT_DISPATCH_LEVEL(ReturnFlags);
@@ -1690,11 +1749,11 @@ Arguments:
 
 
     DEBUGP(DL_TRACE, "<===ReturnNetBufferLists.\n");
-
-
+#endif
 }
 
 
+#if 0
 _Use_decl_annotations_
 VOID
 FilterReceiveNetBufferLists(
@@ -1840,7 +1899,187 @@ N.B.: It is important to check the ReceiveFlags in NDIS_TEST_RECEIVE_CANNOT_PEND
     DEBUGP(DL_TRACE, "<===ReceiveNetBufferList: Flags = %8x.\n", ReceiveFlags);
 
 }
+#endif
 
+#if DROP_PACKETS
+static void CopyPacket(PNET_BUFFER NB, UCHAR* Buf, ULONG Length)
+{
+    ULONG CurrOffset = NET_BUFFER_CURRENT_MDL_OFFSET(NB);
+    ULONG Copied = 0;
+    PMDL CurrMDL;
+    for (CurrMDL = NET_BUFFER_CURRENT_MDL(NB); CurrMDL && Copied < Length; CurrMDL = CurrMDL->Next)
+    {
+        ULONG CurrLen;
+        PVOID CurrAddr;
+        NdisQueryMdl(CurrMDL, &CurrAddr, &CurrLen, NormalPagePriority | MdlMappingNoExecute);
+        if (!CurrAddr)
+        {
+            break;
+        }
+        CurrLen = min(CurrLen - CurrOffset, Length - Copied);
+        NdisMoveMemory(Buf + Copied, (PUCHAR)CurrAddr + CurrOffset, CurrLen);
+
+        Copied += CurrLen;
+        CurrOffset = 0;
+    }
+}
+#endif
+
+static BOOLEAN ShouldDropRx(PMS_FILTER pFilter, PNET_BUFFER_LIST Nbl)
+{
+    BOOLEAN bDrop = TRUE;
+    PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(Nbl);
+    while (nb)
+    {
+        ULONG len = NET_BUFFER_DATA_LENGTH(nb);
+        if (len > LengthToDrop && LengthToDrop)
+        {
+            InterlockedIncrement(&pFilter->DroppedPackets);
+            len = min(len, sizeof(pFilter->PacketBuffer));
+#if DROP_PACKETS
+            CopyPacket(nb, pFilter->PacketBuffer, len);
+#endif
+        }
+        else
+        {
+            bDrop = FALSE;
+        }
+        nb = NET_BUFFER_NEXT_NB(nb);
+    }
+    return bDrop;
+}
+
+static CCHAR GetTargetProcessor(PMS_FILTER pFilter)
+{
+    ULONG last = pFilter->LastCPUNumber + 1;
+    if (last >= NumberOfProcessors)
+    {
+        last = 0;
+    }
+    if (last == KeGetCurrentProcessorIndex())
+    {
+        last++;
+    }
+    if (last >= NumberOfProcessors)
+    {
+        last = 0;
+    }
+    pFilter->LastCPUNumber = last;
+    return (CCHAR)last;
+}
+
+static FILTER_DPC *FindDpc(PMS_FILTER pFilter)
+{
+    ULONG last = pFilter->LastDpcIndex;
+    ULONG index = last + 1;
+    if (index >= RTL_NUMBER_OF(pFilter->DpcArray))
+    {
+        index = 0;
+    }
+    while (index != last)
+    {
+        LONG* pl = &pFilter->DpcArray[index].Allocated;
+        if (InterlockedIncrement(pl) == 1)
+        {
+            return &pFilter->DpcArray[index];
+        }
+        InterlockedDecrement(pl);
+        index++;
+        if (index >= RTL_NUMBER_OF(pFilter->DpcArray))
+        {
+            index = 0;
+        }
+    }
+    return NULL;
+}
+
+VOID
+FilterReceiveNetBufferLists(
+    NDIS_HANDLE         FilterModuleContext,
+    PNET_BUFFER_LIST    Nbls,
+    NDIS_PORT_NUMBER    PortNumber,
+    ULONG               NumberOfNetBufferLists,
+    ULONG               ReceiveFlags
+)
+{
+    PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
+    BOOLEAN    bDriverIsOwner = NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags);
+    InterlockedIncrement(&pFilter->NumIndication);
+    if (bDriverIsOwner || !LengthToDrop)
+    {
+        // for simplicity - do not drop anything
+        NdisFIndicateReceiveNetBufferLists(
+            pFilter->FilterHandle,
+            Nbls,
+            PortNumber,
+            NumberOfNetBufferLists,
+            ReceiveFlags);
+        return;
+    }
+    PNET_BUFFER_LIST DropHead = NULL, IndicateHead = NULL;
+    PNET_BUFFER_LIST* DropTail = &DropHead, *IndicateTail = &IndicateHead;
+    ULONG nofDrop = 0, nofIndicate = 0;
+    while (Nbls)
+    {
+        PNET_BUFFER_LIST next = NET_BUFFER_LIST_NEXT_NBL(Nbls);
+        if (ShouldDropRx(pFilter, Nbls))
+        {
+            *DropTail = Nbls;
+            DropTail = &NET_BUFFER_LIST_NEXT_NBL(Nbls);
+            nofDrop++;
+        }
+        else
+        {
+            *IndicateTail = Nbls;
+            IndicateTail = &NET_BUFFER_LIST_NEXT_NBL(Nbls);
+            nofIndicate++;
+        }
+        NET_BUFFER_LIST_NEXT_NBL(Nbls) = NULL;
+        Nbls = next;
+    }
+    if (nofIndicate)
+    {
+        NdisFIndicateReceiveNetBufferLists(
+            pFilter->FilterHandle,
+            IndicateHead,
+            PortNumber,
+            nofIndicate,
+            ReceiveFlags);
+    }
+    if (nofDrop)
+    {
+#if DROP_PACKETS
+        NdisFReturnNetBufferLists(pFilter->FilterHandle, DropHead, ReceiveFlags & NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
+#else
+        FILTER_DPC* dpc = FindDpc(pFilter);
+        BOOLEAN bIndicateNow = FALSE;
+        if (!dpc)
+        {
+            pFilter->DpcNotFoundCounter++;
+            bIndicateNow = TRUE;
+        }
+        else
+        {
+            KeSetImportanceDpc(&dpc->Dpc, HighImportance);
+            KeSetTargetProcessorDpc(&dpc->Dpc, GetTargetProcessor(pFilter));
+            if (!KeInsertQueueDpc(&dpc->Dpc, DropHead, (PVOID)nofDrop))
+            {
+                InterlockedDecrement(&dpc->Allocated);
+                bIndicateNow = TRUE;
+            }
+        }
+        if (bIndicateNow)
+        {
+            NdisFIndicateReceiveNetBufferLists(
+                pFilter->FilterHandle,
+                DropHead,
+                PortNumber,
+                nofDrop,
+                ReceiveFlags);
+        }
+#endif
+    }
+}
 
 _Use_decl_annotations_
 VOID
