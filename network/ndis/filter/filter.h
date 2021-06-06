@@ -300,6 +300,16 @@ typedef struct _FILTER_DPC
     LONG             Allocated;
 } FILTER_DPC, *PFILTER_DPC;
 
+typedef struct _FILTER_SPREAD_STRUCT
+{
+    PNET_BUFFER_LIST Head;
+    PNET_BUFFER_LIST *Tail;
+    ULONG            Number;
+    CCHAR            Cpu;
+} FILTER_SPREAD_STRUCT;
+
+typedef FILTER_SPREAD_STRUCT FILTER_SPREAD[16];
+
 //
 // Define the filter struct
 //
@@ -348,8 +358,9 @@ typedef struct _MS_FILTER
     UCHAR                           PacketBuffer[0x2000];
     FILTER_DPC                      DpcArray[0x2000];
     ULONG                           LastDpcIndex;
-    ULONG                           LastCPUNumber;
     ULONG                           DpcNotFoundCounter;
+    ULONG                           MultiBufferCounter;
+    FILTER_SPREAD                   Spread;
 
     PNDIS_OID_REQUEST               PendingOidRequest;
 

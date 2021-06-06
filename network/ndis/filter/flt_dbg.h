@@ -97,11 +97,11 @@ typedef PNDIS_SPIN_LOCK     PFILTER_LOCK;
 extern INT                filterDebugLevel;
 
 
-#define DEBUGP(lev, ...)                                                \
+#define DEBUGP(lev, fmt, ...)                                                \
         {                                                               \
             if ((lev) <= filterDebugLevel)                              \
             {                                                           \
-                DbgPrint("NDISLWF: "); DbgPrint(__VA_ARGS__);           \
+                DbgPrint("NDISLWF:" fmt, __VA_ARGS__);           \
             }                                                           \
         }
 
