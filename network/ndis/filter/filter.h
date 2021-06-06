@@ -308,7 +308,7 @@ typedef struct _FILTER_SPREAD_STRUCT
     CCHAR            Cpu;
 } FILTER_SPREAD_STRUCT;
 
-typedef FILTER_SPREAD_STRUCT FILTER_SPREAD[16];
+typedef FILTER_SPREAD_STRUCT FILTER_SPREAD[8];
 
 //
 // Define the filter struct
@@ -348,18 +348,18 @@ typedef struct _MS_FILTER
     BOOLEAN                         bIndicating;
 #endif
     BOOLEAN                         LinkUp;
-    UCHAR                           PauseData[ETH_LENGTH_OF_ADDRESS * 2 + 6];
+    UCHAR                           MacAddress[ETH_LENGTH_OF_ADDRESS];
     NDIS_HANDLE                     TimerObject;
-    ULONG                           TickCounter;
     LONG                            NumIndication;
-    LONG                            DroppedPackets;
-    LONG                            LastDroppedPackets;
+    LONG                            RedirectedPackets;
+    LONG                            LastRedirectedPackets;
     ULONG                           NoTransferCounter;
     UCHAR                           PacketBuffer[0x2000];
     FILTER_DPC                      DpcArray[0x2000];
     ULONG                           LastDpcIndex;
     ULONG                           DpcNotFoundCounter;
     ULONG                           MultiBufferCounter;
+    LONG                            PacketsPerCpu[256];
     FILTER_SPREAD                   Spread;
 
     PNDIS_OID_REQUEST               PendingOidRequest;

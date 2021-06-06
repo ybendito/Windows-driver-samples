@@ -26,9 +26,8 @@ static UCHAR MAC0[ETH_LENGTH_OF_ADDRESS];
 static UCHAR MAC1[ETH_LENGTH_OF_ADDRESS];
 static UCHAR MAC2[ETH_LENGTH_OF_ADDRESS];
 static UCHAR MAC3[ETH_LENGTH_OF_ADDRESS];
-static ULONG timerPeriod = 3;
-static USHORT pauseValue = 0x8000;
-static ULONG LengthToDrop = 0;
+static ULONG timerPeriod = 0;
+static ULONG LargePacketSize = 0;
 static ULONG NumberOfProcessors;
 static ULONG DropLargePackets = FALSE;
 
@@ -38,45 +37,10 @@ static ULONG DropLargePackets = FALSE;
 NDIS_HANDLE         FilterDriverHandle; // NDIS handle for filter driver
 NDIS_HANDLE         FilterDriverObject;
 NDIS_HANDLE         NdisFilterDeviceHandle = NULL;
-NDIS_HANDLE         NblPool = NULL;
 PDEVICE_OBJECT      NdisDeviceObject = NULL;
 
 FILTER_LOCK         FilterListLock;
 LIST_ENTRY          FilterModuleList;
-
-
-static PNET_BUFFER_LIST AllocatePauseNbl()
-{
-    if (!NblPool)
-        return NULL;
-    PNET_BUFFER_LIST nbl = NdisAllocateNetBufferList(NblPool, 0, 0);
-    return nbl;
-}
-
-static void FreePauseNbl(PNET_BUFFER_LIST Nbl)
-{
-    NdisFreeNetBufferList(Nbl);
-}
-
-static void AllocatePool()
-{
-    NET_BUFFER_LIST_POOL_PARAMETERS PoolParams;
-
-    PoolParams.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
-    PoolParams.Header.Size = NDIS_SIZEOF_NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
-    PoolParams.Header.Revision = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
-    PoolParams.ProtocolId = NDIS_PROTOCOL_ID_DEFAULT;
-    PoolParams.fAllocateNetBuffer = TRUE;
-    PoolParams.ContextSize = 0;
-    PoolParams.PoolTag = 'ppph';
-    PoolParams.DataSize = 64;
-    NblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
-}
-
-void ConfigureTimerResolution(BOOLEAN Set)
-{
-    ExSetTimerResolution(Set ? 10000 : 0, Set);
-}
 
 static void QueryConfiguration()
 {
@@ -96,16 +60,15 @@ static void QueryConfiguration()
     }
     NDIS_CONFIGURATION_PARAMETER *param;
     UNICODE_STRING nameMac0, nameMac1, nameMac2, nameMac3;
-    UNICODE_STRING namePeriod, nameValue, nameDebug, nameLengthToDrop, nameDrop;
-    
+    UNICODE_STRING namePeriod, nameDebug, nameLargePacketSize, nameDrop;
+
     RtlInitUnicodeString(&nameMac0, L"MAC0");
     RtlInitUnicodeString(&nameMac1, L"MAC1");
     RtlInitUnicodeString(&nameMac2, L"MAC2");
     RtlInitUnicodeString(&nameMac3, L"MAC3");
     RtlInitUnicodeString(&namePeriod, L"TimerPeriod");
-    RtlInitUnicodeString(&nameValue, L"Value");
     RtlInitUnicodeString(&nameDebug, L"DebugLevel");
-    RtlInitUnicodeString(&nameLengthToDrop, L"DropLength");
+    RtlInitUnicodeString(&nameLargePacketSize, L"LargePacketSize");
     RtlInitUnicodeString(&nameDrop, L"DropLargePackets");
 
     NdisReadConfiguration(&status, &param, cfg, &nameMac0, NdisParameterBinary);
@@ -146,24 +109,17 @@ static void QueryConfiguration()
         timerPeriod = param->ParameterData.IntegerData;
         DEBUGP(DL_INFO, "Using timerPeriod = %d\n", timerPeriod);
     }
-    NdisReadConfiguration(&status, &param, cfg, &nameValue, NdisParameterInteger);
-    if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
-    {
-        param->ParameterData.IntegerData = min(param->ParameterData.IntegerData, 0xffff);
-        pauseValue = (USHORT)param->ParameterData.IntegerData;
-        DEBUGP(DL_INFO, "Using pause Value = %d\n", pauseValue);
-    }
     NdisReadConfiguration(&status, &param, cfg, &nameDebug, NdisParameterInteger);
     if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
     {
         filterDebugLevel = param->ParameterData.IntegerData;
         DEBUGP(DL_ERROR, "Using debug level = %d\n", filterDebugLevel);
     }
-    NdisReadConfiguration(&status, &param, cfg, &nameLengthToDrop, NdisParameterInteger);
+    NdisReadConfiguration(&status, &param, cfg, &nameLargePacketSize, NdisParameterInteger);
     if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
     {
-        LengthToDrop = param->ParameterData.IntegerData;
-        DEBUGP(DL_ERROR, "Using LengthToDrop = %d\n", LengthToDrop);
+        LargePacketSize = param->ParameterData.IntegerData;
+        DEBUGP(DL_ERROR, "Using LargePacketSize = %d\n", LargePacketSize);
     }
     NdisReadConfiguration(&status, &param, cfg, &nameDrop, NdisParameterInteger);
     if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
@@ -316,11 +272,6 @@ do
         DEBUGP(DL_WARN, "Register device for the filter driver failed.\n");
         break;
     }
-    else
-    {
-        AllocatePool();
-        ConfigureTimerResolution(TRUE);
-    }
 } while (bFalse);
 
 
@@ -341,40 +292,6 @@ do
 
     return Status;
 
-}
-
-void FilterSendPauseFrame(PMS_FILTER pFilter)
-{
-    PNET_BUFFER_LIST nbl = AllocatePauseNbl();
-    if (!nbl)
-        return;
-    NDIS_STATUS status = NdisRetreatNetBufferListDataStart(nbl, 64, 0, NULL, NULL);
-    if (!NT_SUCCESS(status))
-    {
-        FreePauseNbl(nbl);
-        return;
-    }
-    PNET_BUFFER nb = NET_BUFFER_LIST_FIRST_NB(nbl);
-    while (nb)
-    {
-        DEBUGP(DL_LOUD, "NB of %d:\n", NET_BUFFER_DATA_LENGTH(nb));
-        PMDL mdl = NET_BUFFER_CURRENT_MDL(nb);
-        if (mdl)
-        {
-            PVOID ps = MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
-            PVOID pv = MmGetMdlVirtualAddress(mdl);
-            ULONG count = MmGetMdlByteCount(mdl);
-            DEBUGP(DL_LOUD, "MDL at %p:%p, count %d\n", ps, pv, count);
-            if (count == 64)
-            {
-                RtlZeroMemory(pv, 64);
-                RtlCopyMemory(pv, pFilter->PauseData, sizeof(pFilter->PauseData));
-                NdisFSendNetBufferLists(pFilter->FilterHandle, nbl, 0, 0);
-                break;
-            }
-        }
-        nb = NET_BUFFER_NEXT_NB(nb);
-    }
 }
 
 _Use_decl_annotations_
@@ -435,26 +352,20 @@ void FilterTimerProc(
     UNREFERENCED_PARAMETER(SystemSpecific3);
     UNREFERENCED_PARAMETER(pFilter);
     DEBUGP(DL_LOUD, "===>%s\n", __FUNCTION__);
-    FilterSendPauseFrame(pFilter);
-    pFilter->TickCounter++;
-    if ((pFilter->TickCounter % 1024) == 0)
+    if (timerPeriod >= 5000)
     {
-        DEBUGP(DL_INFO, "%s: Another 1024 tick\n", __FUNCTION__);
-    }
-    else if (timerPeriod >= 5000)
-    {
-        DEBUGP(DL_INFO, "%s: Tick, dropped %d\n", __FUNCTION__, pFilter->DroppedPackets);
-        if (pFilter->DroppedPackets != pFilter->LastDroppedPackets)
+        DEBUGP(DL_INFO, "%s: Tick, redirected %d\n", __FUNCTION__, pFilter->RedirectedPackets);
+        if (pFilter->RedirectedPackets != pFilter->LastRedirectedPackets)
         {
-            pFilter->LastDroppedPackets = pFilter->DroppedPackets;
+            pFilter->LastRedirectedPackets = pFilter->RedirectedPackets;
             pFilter->NoTransferCounter = 0;
         }
-        else if (pFilter->DroppedPackets)
+        else if (pFilter->RedirectedPackets)
         {
             pFilter->NoTransferCounter++;
             if (pFilter->NoTransferCounter > 2)
             {
-                pFilter->DroppedPackets = pFilter->LastDroppedPackets = 0;
+                pFilter->RedirectedPackets = pFilter->LastRedirectedPackets = 0;
                 pFilter->NoTransferCounter = 0;
                 DEBUGP(DL_INFO, "%s: was %d indications\n", __FUNCTION__, pFilter->NumIndication);
                 DEBUGP(DL_INFO, "%s: DpcNotFounds = %d, Multibuffers = %d\n", __FUNCTION__, pFilter->DpcNotFoundCounter, pFilter->MultiBufferCounter);
@@ -663,15 +574,7 @@ N.B.:  FILTER can use NdisRegisterDeviceEx to create a device, so the upper
             break;
         }
 
-        const UCHAR MilticastAddress[ETH_LENGTH_OF_ADDRESS] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x01 };
-        ETH_COPY_NETWORK_ADDRESS(pFilter->PauseData, MilticastAddress);
-        ETH_COPY_NETWORK_ADDRESS(pFilter->PauseData + ETH_LENGTH_OF_ADDRESS, AttachParameters->CurrentMacAddress);
-        pFilter->PauseData[12] = 0x88;
-        pFilter->PauseData[13] = 0x08;
-        pFilter->PauseData[14] = 0x00;
-        pFilter->PauseData[15] = 0x01;
-        pFilter->PauseData[16] = pauseValue >> 8; 
-        pFilter->PauseData[17] = pauseValue & 0xff;
+        ETH_COPY_NETWORK_ADDRESS(pFilter->MacAddress, AttachParameters->CurrentMacAddress);
 
         for (i = 0; i < RTL_NUMBER_OF(pFilter->DpcArray); ++i)
         {
@@ -968,7 +871,8 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
 --*/
 {
     PMS_FILTER                  pFilter = (PMS_FILTER)FilterModuleContext;
-    BOOLEAN                      bFalse = FALSE;
+    UINT                        i;
+    BOOLEAN                     bFalse = FALSE;
 
 
     DEBUGP(DL_TRACE, "===>FilterDetach:    FilterInstance %p\n", FilterModuleContext);
@@ -992,6 +896,16 @@ NOTE: Called at PASSIVE_LEVEL and the filter is in paused state
         FILTER_FREE_MEM(pFilter->FilterName.Buffer);
     }
 
+    for (i = 0; i < RTL_NUMBER_OF(pFilter->PacketsPerCpu); ++i)
+    {
+        if (pFilter->PacketsPerCpu[i])
+        {
+            UCHAR* a = pFilter->MacAddress;
+            DEBUGP(DL_INFO, "MAC0 %02x-%02x-%02x-%02x-%02x-%02x\n",
+                a[0], a[1], a[2], a[3], a[4], a[5]);
+            DEBUGP(DL_INFO, "CPU %d: %d packets\n", i, pFilter->PacketsPerCpu[i]);
+        }
+    }
 
     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
     RemoveEntryList(&pFilter->FilterModuleLink);
@@ -1047,12 +961,6 @@ Return Value:
     FilterDeregisterDevice();
 
     NdisFDeregisterFilterDriver(FilterDriverHandle);
-    DEBUGP(DL_TRACE, "Deleting the NBL pool...\n");
-    if (NblPool)
-    {
-        NdisFreeNetBufferListPool(NblPool);
-    }
-    ConfigureTimerResolution(FALSE);
 
 #if DBG
     FILTER_ACQUIRE_LOCK(&FilterListLock, bFalse);
@@ -1557,7 +1465,6 @@ Return Value:
 {
     PMS_FILTER         pFilter = (PMS_FILTER)FilterModuleContext;
     BOOLEAN            DispatchLevel;
-    PNET_BUFFER_LIST   *pCurrent = &NetBufferLists;
 
     //
     // If your filter injected any send packets into the datapath to be sent,
@@ -1565,26 +1472,6 @@ Return Value:
     // attempt to send-complete your NBLs up to the higher layer.
     //
 
-    while (*pCurrent)
-    {
-        PNET_BUFFER_LIST CurrentNbl = *pCurrent;
-        if (CurrentNbl->NdisPoolHandle == NblPool)
-        {
-            NdisAdvanceNetBufferListDataStart(CurrentNbl, 64, FALSE, NULL);
-            *pCurrent = NET_BUFFER_LIST_NEXT_NBL(CurrentNbl);
-            NET_BUFFER_LIST_NEXT_NBL(CurrentNbl) = NULL;
-            FreePauseNbl(CurrentNbl);
-            DEBUGP(DL_LOUD, "Removed completed Pause NBL, new current %p\n", *pCurrent);
-        }
-        else
-        {
-            pCurrent = &(NET_BUFFER_LIST_NEXT_NBL(CurrentNbl));
-        }
-    }
-    if (!NetBufferLists)
-    {
-        return;
-    }
     // Send complete the NBLs.  If you removed any NBLs from the chain, make
     // sure the chain isn't empty (i.e., NetBufferLists!=NULL).
     DispatchLevel = NDIS_TEST_SEND_AT_DISPATCH_LEVEL(SendCompleteFlags);
@@ -1955,14 +1842,15 @@ static BOOLEAN ShouldRedirectRx(PMS_FILTER pFilter, PNET_BUFFER_LIST Nbl, PUCHAR
     while (nb)
     {
         ULONG len = NET_BUFFER_DATA_LENGTH(nb);
-        if (len > LengthToDrop && LengthToDrop)
+        if (len > LargePacketSize && LargePacketSize)
         {
-            InterlockedIncrement(&pFilter->DroppedPackets);
             len = min(len, sizeof(buffer));
             CopyPacket(nb, buffer, len);
             if (buffer[12] == 0x08 && buffer[13] == 0x00 && buffer[23] == 17)
             {
-                *pc = buffer[37] & 0xf;
+                *pc = buffer[37] & (RTL_NUMBER_OF(pFilter->Spread) - 1);
+                InterlockedIncrement(&pFilter->RedirectedPackets);
+                InterlockedIncrement(&pFilter->PacketsPerCpu[KeGetCurrentProcessorIndex()]);
             }
             else
             {
@@ -2024,7 +1912,7 @@ FilterReceiveNetBufferLists(
     BOOLEAN    bDriverIsOwner = NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags);
     BOOLEAN    bDrop = !!DropLargePackets;
     InterlockedIncrement(&pFilter->NumIndication);
-    if (bDriverIsOwner || !LengthToDrop)
+    if (bDriverIsOwner || !LargePacketSize)
     {
         // for simplicity - do not drop anything
         NdisFIndicateReceiveNetBufferLists(
