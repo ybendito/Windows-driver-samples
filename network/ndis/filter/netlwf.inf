@@ -196,7 +196,8 @@ HKR, Parameters, MAC2, 0x00000003,00,00,00,00,00,00 ; MAC2
 HKR, Parameters, MAC3, 0x00000003,00,00,00,00,00,00 ; MAC3
 HKR, Parameters, TimerPeriod,0x00010001,5001 ; Timer Period
 HKR, Parameters, LargePacketSize,0x00010001, 0
-HKR, Parameters, DropLargePackets,0x00010001, 0
+; 0 - count, 1 - split & drop, 2 - split & redirect, 3 - split & count
+HKR, Parameters, LargePacketsAction,0x00010001, 0
 
 [Strings]
 ; TODO: Customize these strings.

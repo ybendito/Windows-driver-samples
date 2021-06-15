@@ -351,6 +351,7 @@ typedef struct _MS_FILTER
     UCHAR                           MacAddress[ETH_LENGTH_OF_ADDRESS];
     NDIS_HANDLE                     TimerObject;
     LONG                            NumIndication;
+    LONG                            IncomingPackets;
     LONG                            RedirectedPackets;
     LONG                            LastRedirectedPackets;
     ULONG                           NoTransferCounter;

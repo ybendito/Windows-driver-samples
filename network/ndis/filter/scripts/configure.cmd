@@ -6,5 +6,5 @@ reg add HKLM\SYSTEM\CurrentControlSet\Services\NdisLwf\Parameters /f /v MAC1 /t 
 reg add HKLM\SYSTEM\CurrentControlSet\Services\NdisLwf\Parameters /f /v MAC2 /t REG_BINARY /d 000000000000
 reg add HKLM\SYSTEM\CurrentControlSet\Services\NdisLwf\Parameters /f /v MAC3 /t REG_BINARY /d 000000000000
 reg add HKLM\SYSTEM\CurrentControlSet\Services\NdisLwf\Parameters /f /v LargePacketSize /t REG_DWORD /d 4096
-reg add HKLM\SYSTEM\CurrentControlSet\Services\NdisLwf\Parameters /f /v DropLargePackets /t REG_DWORD /d 0
+reg add HKLM\SYSTEM\CurrentControlSet\Services\NdisLwf\Parameters /f /v LargePacketsAction /t REG_DWORD /d 0
 net start ndislwf

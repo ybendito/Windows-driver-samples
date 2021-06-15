@@ -29,7 +29,12 @@ static UCHAR MAC3[ETH_LENGTH_OF_ADDRESS];
 static ULONG timerPeriod = 0;
 static ULONG LargePacketSize = 0;
 static ULONG NumberOfProcessors;
-static ULONG DropLargePackets = FALSE;
+
+#define ACTION_COUNT        0 // just check without split
+#define ACTION_DROP         1 // split then drop 
+#define ACTION_REDIRECT     2 // split then redirect
+#define ACTION_SPLIT        3 // split then indicate
+static ULONG LargePacketsAction = ACTION_COUNT;
 
 //
 // Global variables
@@ -41,12 +46,19 @@ PDEVICE_OBJECT      NdisDeviceObject = NULL;
 
 FILTER_LOCK         FilterListLock;
 LIST_ENTRY          FilterModuleList;
+BOOLEAN configured;
 
 static void QueryConfiguration()
 {
     NDIS_CONFIGURATION_OBJECT co;
     NDIS_HANDLE cfg;
     NDIS_STATUS status;
+    if (configured)
+    {
+        return;
+    }
+    configured = 1;
+
     co.Header.Type = NDIS_OBJECT_TYPE_CONFIGURATION_OBJECT;
     co.Header.Revision = NDIS_CONFIGURATION_OBJECT_REVISION_1;
     co.Header.Size = NDIS_SIZEOF_CONFIGURATION_OBJECT_REVISION_1;
@@ -60,7 +72,7 @@ static void QueryConfiguration()
     }
     NDIS_CONFIGURATION_PARAMETER *param;
     UNICODE_STRING nameMac0, nameMac1, nameMac2, nameMac3;
-    UNICODE_STRING namePeriod, nameDebug, nameLargePacketSize, nameDrop;
+    UNICODE_STRING namePeriod, nameDebug, nameLargePacketSize, nameAction;
 
     RtlInitUnicodeString(&nameMac0, L"MAC0");
     RtlInitUnicodeString(&nameMac1, L"MAC1");
@@ -69,7 +81,7 @@ static void QueryConfiguration()
     RtlInitUnicodeString(&namePeriod, L"TimerPeriod");
     RtlInitUnicodeString(&nameDebug, L"DebugLevel");
     RtlInitUnicodeString(&nameLargePacketSize, L"LargePacketSize");
-    RtlInitUnicodeString(&nameDrop, L"DropLargePackets");
+    RtlInitUnicodeString(&nameAction, L"LargePacketsAction");
 
     NdisReadConfiguration(&status, &param, cfg, &nameMac0, NdisParameterBinary);
     if (NT_SUCCESS(status) && param->ParameterType == NdisParameterBinary && param->ParameterData.BinaryData.Length == ETH_LENGTH_OF_ADDRESS)
@@ -121,11 +133,11 @@ static void QueryConfiguration()
         LargePacketSize = param->ParameterData.IntegerData;
         DEBUGP(DL_ERROR, "Using LargePacketSize = %d\n", LargePacketSize);
     }
-    NdisReadConfiguration(&status, &param, cfg, &nameDrop, NdisParameterInteger);
+    NdisReadConfiguration(&status, &param, cfg, &nameAction, NdisParameterInteger);
     if (NT_SUCCESS(status) && param->ParameterType == NdisParameterInteger)
     {
-        DropLargePackets = param->ParameterData.IntegerData;
-        DEBUGP(DL_ERROR, "Using DropLargePackets = %d\n", DropLargePackets);
+        LargePacketsAction = param->ParameterData.IntegerData;
+        DEBUGP(DL_ERROR, "Using LargePacketsAction = %d\n", LargePacketsAction);
     }
 
     NdisCloseConfiguration(cfg);
@@ -365,10 +377,14 @@ void FilterTimerProc(
             pFilter->NoTransferCounter++;
             if (pFilter->NoTransferCounter > 2)
             {
+                DEBUGP(DL_INFO, "%s: was %d indications, %d incoming\n", __FUNCTION__, pFilter->NumIndication, pFilter->IncomingPackets);
+                DEBUGP(DL_INFO, "%s: DpcNotFounds = %d, Multibuffers = %d\n", __FUNCTION__, pFilter->DpcNotFoundCounter, pFilter->MultiBufferCounter);
+                pFilter->IncomingPackets = 0;
+                pFilter->NumIndication = 0;
+                pFilter->DpcNotFoundCounter = 0;
+                pFilter->MultiBufferCounter = 0;
                 pFilter->RedirectedPackets = pFilter->LastRedirectedPackets = 0;
                 pFilter->NoTransferCounter = 0;
-                DEBUGP(DL_INFO, "%s: was %d indications\n", __FUNCTION__, pFilter->NumIndication);
-                DEBUGP(DL_INFO, "%s: DpcNotFounds = %d, Multibuffers = %d\n", __FUNCTION__, pFilter->DpcNotFoundCounter, pFilter->MultiBufferCounter);
             }
         }
     }
@@ -1899,6 +1915,16 @@ static FILTER_DPC *FindDpc(PMS_FILTER pFilter)
     return NULL;
 }
 
+static void CheckLargeNbls(PMS_FILTER pFilter, PNET_BUFFER_LIST Nbl)
+{
+    UCHAR index = 0;
+    while (Nbl)
+    {
+        ShouldRedirectRx(pFilter, Nbl, &index);
+        Nbl = NET_BUFFER_LIST_NEXT_NBL(Nbl);
+    }
+}
+
 VOID
 FilterReceiveNetBufferLists(
     NDIS_HANDLE         FilterModuleContext,
@@ -1910,10 +1936,13 @@ FilterReceiveNetBufferLists(
 {
     PMS_FILTER pFilter = (PMS_FILTER)FilterModuleContext;
     BOOLEAN    bDriverIsOwner = NDIS_TEST_RECEIVE_CANNOT_PEND(ReceiveFlags);
-    BOOLEAN    bDrop = !!DropLargePackets;
     InterlockedIncrement(&pFilter->NumIndication);
-    if (bDriverIsOwner || !LargePacketSize)
+    InterlockedAdd(&pFilter->IncomingPackets, NumberOfNetBufferLists);
+    if (bDriverIsOwner || !LargePacketSize || LargePacketsAction == ACTION_COUNT)
     {
+        if (LargePacketsAction == ACTION_COUNT && LargePacketSize) {
+            CheckLargeNbls(pFilter, Nbls);
+        }
         // for simplicity - do not drop anything
         NdisFIndicateReceiveNetBufferLists(
             pFilter->FilterHandle,
@@ -1939,7 +1968,7 @@ FilterReceiveNetBufferLists(
         UCHAR index = 0;
         if (ShouldRedirectRx(pFilter, Nbls, &index))
         {
-            if (bDrop) index = 0;
+            if (LargePacketsAction != ACTION_REDIRECT) index = 0;
 
             *(Spread[index].Tail) = Nbls;
             Spread[index].Tail = &NET_BUFFER_LIST_NEXT_NBL(Nbls);
@@ -1968,18 +1997,20 @@ FilterReceiveNetBufferLists(
         if (Spread[i].Number)
         {
             FILTER_DPC* dpc = NULL;
-            if (!bDrop)
+            if (LargePacketsAction == ACTION_REDIRECT)
             {
                 dpc = FindDpc(pFilter);
             }
             BOOLEAN bIndicateNow = FALSE;
-            if (!dpc && bDrop)
+            if (LargePacketsAction == ACTION_DROP)
             {
                 NdisFReturnNetBufferLists(pFilter->FilterHandle, Spread[i].Head, ReceiveFlags & NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
             }
             else if (!dpc)
             {
-                pFilter->DpcNotFoundCounter++;
+                if (LargePacketsAction == ACTION_REDIRECT) {
+                    pFilter->DpcNotFoundCounter++;
+                }
                 bIndicateNow = TRUE;
             }
             else
